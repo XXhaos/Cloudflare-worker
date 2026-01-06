@@ -3,12 +3,12 @@
  */
 const CONFIG = {
   // Notion 配置
-  NOTION_DATABASE_ID: "2dee5672038f80778f72e864c361a26a", 
-  NOTION_API_KEY: "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",
+  NOTION_DATABASE_ID: "xxxx", 
+  NOTION_API_KEY: "xxxx",
 
   // Telegram 配置
-  TELEGRAM_BOT_TOKEN: "8247694128:AAEjkBuS-1ockjOmoW9LjHkHBO-t_Zy8BPE",
-  ALLOWED_USER_IDS: ["1732587552"],
+  TELEGRAM_BOT_TOKEN: "xxxx",
+  ALLOWED_USER_IDS: ["xxxx"],
 
   // Redfin 抓取配置
   REDFIN_URL: "https://www.redfin.com/zipcode/97212",
