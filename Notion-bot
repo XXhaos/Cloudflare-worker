@@ -3,12 +3,12 @@
  */
 const CONFIG = {
   // Notion 配置
-  NOTION_DATABASE_ID: "xxxx", 
-  NOTION_API_KEY: "xxxx",
+  NOTION_DATABASE_ID: "修改为对应的NOTION_DATABASE_ID", 
+  NOTION_API_KEY: "修改为对应的NOTION_API_KEY",
 
   // Telegram 配置
-  TELEGRAM_BOT_TOKEN: "xxxx",
-  ALLOWED_USER_IDS: ["xxxx"],
+  TELEGRAM_BOT_TOKEN: "修改为对应的TELEGRAM_BOT_TOKEN",
+  ALLOWED_USER_IDS: ["修改为对应的ALLOWED_USER_IDS"],
 
   // Redfin 抓取配置
   REDFIN_URL: "https://www.redfin.com/zipcode/97212",
@@ -76,12 +76,6 @@ function getUserId(update) {
   return null;
 }
 
-function getSevenDaysAgoISO() {
-  const date = new Date();
-  date.setDate(date.getDate() - 7);
-  return date.toISOString();
-}
-
 // 菜单
 async function sendWelcomeMenu(chatId) {
   const text = "👋 欢迎回来！\n\n请点击下方按钮开始操作：";
@@ -142,7 +136,8 @@ async function handleGetAccount(chatId) {
   ]);
 
   if (!page) {
-    return sendMessage(chatId, "⚠️ <b>库存不足</b>：当前没有“一周内创建”且“未使用”的账号。");
+    // 文案修改：去掉了“一周内创建”
+    return sendMessage(chatId, "⚠️ <b>库存不足</b>：当前没有“未使用”的账号。");
   }
 
   const props = page.properties;
@@ -151,6 +146,7 @@ async function handleGetAccount(chatId) {
   const account = props["账号"]?.formula?.string || props["账号"]?.rich_text?.[0]?.plain_text || props["账号"]?.title?.[0]?.plain_text || "无账号";
   const password = props["密码"]?.formula?.string || props["密码"]?.rich_text?.[0]?.plain_text || "无密码";
 
+  // 读取创建时间 (兼容 Created time 和 Date 类型)
   let createTimeRaw = props["创建时间"]?.created_time || props["创建时间"]?.date?.start || "未知";
   let createTimeStr = "未知";
   
@@ -164,8 +160,9 @@ async function handleGetAccount(chatId) {
     }).replace(/\//g, '-');
   }
 
+  // 文案修改：去掉了“本周”
   const messageText = 
-    `📦 <b>提取成功！</b> (📊 本周库存: ${stockCount})\n\n` +
+    `📦 <b>提取成功！</b> (📊 库存: ${stockCount})\n\n` +
     `账号：<code>${account}</code>\n` +
     `密码：<code>${password}</code>\n` +
     `Xbox创建时间：${createTimeStr}\n\n` +
@@ -189,12 +186,13 @@ async function handleGetAccount(chatId) {
 // 3. 处理库存查询
 async function handleCheckStock(chatId) {
   const count = await getStockCount();
+  // 文案修改：去掉了“一周内创建”
   const text = `📊 <b>库存查询结果</b>\n\n` +
-               `一周内创建且未使用的白号：<b>${count}</b> 个`;
+               `当前剩余可用白号：<b>${count}</b> 个`;
   await sendMessage(chatId, text);
 }
 
-// 4. 处理按钮回调 (🔴 核心修改部分)
+// 4. 处理按钮回调
 async function handleCallback(query) {
   const [action, pageId] = query.data.split("|");
   const chatId = query.message.chat.id;
@@ -212,10 +210,9 @@ async function handleCallback(query) {
   originalText = originalText.replace(/👇.*/s, "").trim();
 
   // 🔄 重新给账号和密码加上 <code> 标签 (利用正则匹配)
-  // 这样更新后的消息依然可以点击复制
   originalText = originalText.replace(/(账号：)(.+)/, '$1<code>$2</code>');
   originalText = originalText.replace(/(密码：)(.+)/, '$1<code>$2</code>');
-  originalText = originalText.replace(/(📍)(.+)/, '$1<code>$2</code>'); // 防止地址也被误伤
+  originalText = originalText.replace(/(📍)(.+)/, '$1<code>$2</code>'); 
 
   // 准备新状态和时间
   let newStatus = action === "redeem" ? "兑换码" : "其他";
@@ -230,10 +227,8 @@ async function handleCallback(query) {
   const success = await updateNotionPage(pageId, newStatus);
 
   if (success) {
-    // 拼接最终消息：原内容 + 状态 + 时间
+    // 拼接最终消息
     const finalText = `${originalText}\n\n${statusText}\n🕒 <b>使用时间：</b>${nowStr}`;
-    
-    // 编辑消息（去掉了按钮，保留了信息）
     await editMessage(chatId, messageId, finalText);
     await answerCallback(query.id, "操作成功！");
   } else {
@@ -245,8 +240,8 @@ async function handleCallback(query) {
 
 async function queryNotionUnused() {
   const url = `https://api.notion.com/v1/databases/${CONFIG.NOTION_DATABASE_ID}/query`;
-  const sevenDaysAgo = getSevenDaysAgoISO();
 
+  // 🔴 修改：去掉了日期过滤，只保留“状态为空”
   const response = await fetch(url, {
     method: "POST",
     headers: {
@@ -255,12 +250,7 @@ async function queryNotionUnused() {
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
-      "filter": {
-        "and": [
-          { "property": "状态", "select": { "is_empty": true } },
-          { "property": "创建时间", "date": { "on_or_after": sevenDaysAgo } }
-        ]
-      },
+      "filter": { "property": "状态", "select": { "is_empty": true } }, // 仅筛选空状态
       "sorts": [{ "property": "创建时间", "direction": "ascending" }],
       "page_size": 1
     })
@@ -272,9 +262,9 @@ async function queryNotionUnused() {
 
 async function getStockCount() {
   const url = `https://api.notion.com/v1/databases/${CONFIG.NOTION_DATABASE_ID}/query`;
-  const sevenDaysAgo = getSevenDaysAgoISO();
 
   try {
+    // 🔴 修改：去掉了日期过滤，只保留“状态为空”
     const response = await fetch(url, {
       method: "POST",
       headers: {
@@ -283,12 +273,7 @@ async function getStockCount() {
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        "filter": {
-          "and": [
-            { "property": "状态", "select": { "is_empty": true } },
-            { "property": "创建时间", "date": { "on_or_after": sevenDaysAgo } }
-          ]
-        },
+        "filter": { "property": "状态", "select": { "is_empty": true } }, // 仅筛选空状态
         "page_size": 100 
       })
     });
