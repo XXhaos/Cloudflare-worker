@@ -10,8 +10,7 @@ const CONFIG = {
   TELEGRAM_BOT_TOKEN: "修改为对应的TELEGRAM_BOT_TOKEN",
   ALLOWED_USER_IDS: ["修改为对应的ALLOWED_USER_IDS"],
 
-  // Redfin 抓取配置
-  REDFIN_URL: "https://www.redfin.com/zipcode/97212",
+  // 基础配置
   CITY: "Portland",
   STATE_FULL: "Oregon",
   ZIP_CODE: "97212"
@@ -92,43 +91,105 @@ async function sendWelcomeMenu(chatId) {
 
 // --- 核心业务逻辑 ---
 
-// 1. 处理 Redfin 地址抓取
+// 1. 处理地址抓取 (OSM 纯在线版 - 循环重试机制)
 async function handleRedfinAddress(chatId, isJsonOnly = false) {
-  try {
-    const response = await fetch(CONFIG.REDFIN_URL, {
-      headers: { 
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" 
-      }
-    });
-    const html = await response.text();
-    const addressRegex = /"streetAddress":"([^"]+)"/g;
-    let matches = [];
-    let match;
-    while ((match = addressRegex.exec(html)) !== null) {
-      matches.push(match[1]);
-    }
+  // 关键词池：混合了商业、住宅、通用名词，保证多样性
+  const searchTerms = [
+      "apartments", "house", "residential", "coffee", "shop", "restaurant", 
+      "school", "bakery", "pharmacy", "gym", "bank", "salon", "market", "clinic",
+      "office", "center", "park", "store", "hotel", "bar", "pizza", "burger",
+      "Avenue", "Street", "Place", "Court", "Drive", "Lane", "Way", "Terrace",
+      "Broadway", "Main", "Central", "North", "South", "East", "West",
+      "Garden", "View", "Hill", "Lake", "Plaza", "Square", "Village", "Corner"
+  ];
 
-    if (matches.length > 0) {
-      const street = matches[Math.floor(Math.random() * matches.length)];
+  let lastError = null;
+
+  // 🔄 循环重试机制：最多尝试 5 次
+  // 如果某次关键词搜不到（比如搜 'Lake' 没结果），循环会自动继续下一次，直到搜到为止
+  // 这样避免了递归调用导致的“重试次数过多”报错
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      // 随机选一个关键词
+      const keyword = searchTerms[Math.floor(Math.random() * searchTerms.length)];
+      
+      // 构造 OSM 搜索查询 (限制在 97212)
+      // limit=50 保证结果足够多，防止重复
+      const osmUrl = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(keyword + " in 97212, Portland, Oregon")}&format=json&addressdetails=1&limit=50`;
+
+      const response = await fetch(osmUrl, {
+        headers: {
+          "User-Agent": "RealAddressBot/5.0", // 必须带 UA
+          "Referer": "https://www.openstreetmap.org/"
+        }
+      });
+
+      if (!response.ok) {
+        lastError = `API Error ${response.status}`;
+        continue; // 网络错误，重试下一次
+      }
+
+      const data = await response.json();
+
+      // 严格清洗数据：必须包含【门牌号】、【路名】且邮编匹配
+      const validAddresses = data.filter(item => {
+          const addr = item.address;
+          return addr && 
+                 addr.house_number &&  
+                 addr.road &&          
+                 addr.postcode &&      
+                 addr.postcode.includes("97212");
+      });
+
+      // 如果当前关键词搜不到结果，continue 继续下一次循环
+      if (validAddresses.length === 0) {
+          continue;
+      }
+
+      // --- 成功获取！---
+      
+      // 随机抽取一个
+      const randomPlace = validAddresses[Math.floor(Math.random() * validAddresses.length)];
+      const addr = randomPlace.address;
+
+      // 格式化地址
+      const street = `${addr.house_number} ${addr.road}`;
+      const city = addr.city || addr.town || "Portland";
+      const state = "OR";
+      const zip = "97212";
+
+      const fullAddr = `${street}, ${city}, ${state} ${zip}`;
+
       const result = {
         address: street,
-        city: CONFIG.CITY,
-        state: CONFIG.STATE_FULL,
-        fullAddress: `${street}, ${CONFIG.CITY}, OR ${CONFIG.ZIP_CODE}`
+        city: city,
+        state: state,
+        zip: zip,
+        fullAddress: fullAddr
       };
+
       if (!isJsonOnly && chatId) {
         const msg = `🏠 <b>随机房源地址</b>\n\n📍 <code>${result.fullAddress}</code>`;
         await sendMessage(chatId, msg);
       }
-      return result;
+
+      return result; // 成功返回，结束函数
+
+    } catch (e) {
+      lastError = e.message;
+      // 捕获异常，继续下一次循环尝试
     }
-    return { error: "No address found" };
-  } catch (e) {
-    return { error: e.message };
   }
+
+  // --- 如果 5 次循环全部失败 ---
+  // 这里必须报错，因为你不允许生成假地址
+  if (chatId) {
+     await sendMessage(chatId, `❌ <b>获取失败:</b> 在线搜索无结果 (已重试5次)，请稍后再试。`);
+  }
+  return { error: "Failed to fetch online address after 5 attempts" };
 }
 
-// 2. 处理取号
+// 2. 处理取号 (已修复“组合”丢失的问题)
 async function handleGetAccount(chatId) {
   const [page, stockCount] = await Promise.all([
     queryNotionUnused(), 
@@ -136,7 +197,6 @@ async function handleGetAccount(chatId) {
   ]);
 
   if (!page) {
-    // 文案修改：去掉了“一周内创建”
     return sendMessage(chatId, "⚠️ <b>库存不足</b>：当前没有“未使用”的账号。");
   }
 
@@ -146,7 +206,7 @@ async function handleGetAccount(chatId) {
   const account = props["账号"]?.formula?.string || props["账号"]?.rich_text?.[0]?.plain_text || props["账号"]?.title?.[0]?.plain_text || "无账号";
   const password = props["密码"]?.formula?.string || props["密码"]?.rich_text?.[0]?.plain_text || "无密码";
 
-  // 读取创建时间 (兼容 Created time 和 Date 类型)
+  // 读取创建时间
   let createTimeRaw = props["创建时间"]?.created_time || props["创建时间"]?.date?.start || "未知";
   let createTimeStr = "未知";
   
@@ -160,11 +220,11 @@ async function handleGetAccount(chatId) {
     }).replace(/\//g, '-');
   }
 
-  // 文案修改：去掉了“本周”
   const messageText = 
     `📦 <b>提取成功！</b> (📊 库存: ${stockCount})\n\n` +
     `账号：<code>${account}</code>\n` +
     `密码：<code>${password}</code>\n` +
+    `组合：<code>${account}----${password}</code>\n` + 
     `Xbox创建时间：${createTimeStr}\n\n` +
     `👇 <b>请选择操作：</b>`;
 
@@ -186,7 +246,6 @@ async function handleGetAccount(chatId) {
 // 3. 处理库存查询
 async function handleCheckStock(chatId) {
   const count = await getStockCount();
-  // 文案修改：去掉了“一周内创建”
   const text = `📊 <b>库存查询结果</b>\n\n` +
                `当前剩余可用白号：<b>${count}</b> 个`;
   await sendMessage(chatId, text);
@@ -203,22 +262,18 @@ async function handleCallback(query) {
     return;
   }
 
-  // 获取原始消息文本（Telegram 会去掉格式）
   let originalText = query.message.text || "";
-  
-  // 去掉底部的 "👇 请选择操作：" 提示
   originalText = originalText.replace(/👇.*/s, "").trim();
 
-  // 🔄 重新给账号和密码加上 <code> 标签 (利用正则匹配)
+  // 🔄 重新给账号、密码、组合、地址加上 <code> 标签
   originalText = originalText.replace(/(账号：)(.+)/, '$1<code>$2</code>');
   originalText = originalText.replace(/(密码：)(.+)/, '$1<code>$2</code>');
+  originalText = originalText.replace(/(组合：)(.+)/, '$1<code>$2</code>'); 
   originalText = originalText.replace(/(📍)(.+)/, '$1<code>$2</code>'); 
 
-  // 准备新状态和时间
   let newStatus = action === "redeem" ? "兑换码" : "其他";
   let statusText = action === "redeem" ? "✅ <b>已标记为：兑换码</b>" : "🔘 <b>已标记为：其他</b>";
   
-  // 获取当前时间
   const nowStr = new Date().toLocaleString('zh-CN', { 
     timeZone: 'Asia/Shanghai', 
     hour12: false 
@@ -227,7 +282,6 @@ async function handleCallback(query) {
   const success = await updateNotionPage(pageId, newStatus);
 
   if (success) {
-    // 拼接最终消息
     const finalText = `${originalText}\n\n${statusText}\n🕒 <b>使用时间：</b>${nowStr}`;
     await editMessage(chatId, messageId, finalText);
     await answerCallback(query.id, "操作成功！");
@@ -241,7 +295,6 @@ async function handleCallback(query) {
 async function queryNotionUnused() {
   const url = `https://api.notion.com/v1/databases/${CONFIG.NOTION_DATABASE_ID}/query`;
 
-  // 🔴 修改：去掉了日期过滤，只保留“状态为空”
   const response = await fetch(url, {
     method: "POST",
     headers: {
@@ -264,7 +317,6 @@ async function getStockCount() {
   const url = `https://api.notion.com/v1/databases/${CONFIG.NOTION_DATABASE_ID}/query`;
 
   try {
-    // 🔴 修改：去掉了日期过滤，只保留“状态为空”
     const response = await fetch(url, {
       method: "POST",
       headers: {
