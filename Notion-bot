@@ -91,105 +91,78 @@ async function sendWelcomeMenu(chatId) {
 
 // --- 核心业务逻辑 ---
 
-// 1. 处理地址抓取 (OSM 纯在线版 - 循环重试机制)
+// 1. 处理地址抓取 (👑 终极降维打击版：Overpass API 数据库直连)
 async function handleRedfinAddress(chatId, isJsonOnly = false) {
-  // 关键词池：混合了商业、住宅、通用名词，保证多样性
-  const searchTerms = [
-      "apartments", "house", "residential", "coffee", "shop", "restaurant", 
-      "school", "bakery", "pharmacy", "gym", "bank", "salon", "market", "clinic",
-      "office", "center", "park", "store", "hotel", "bar", "pizza", "burger",
-      "Avenue", "Street", "Place", "Court", "Drive", "Lane", "Way", "Terrace",
-      "Broadway", "Main", "Central", "North", "South", "East", "West",
-      "Garden", "View", "Hill", "Lake", "Plaza", "Square", "Village", "Corner"
-  ];
+  try {
+    // 💡 放弃搜索，改为“数据库框选”
+    // (45.530,-122.665,45.555,-122.615) 是完美覆盖 Portland 97212 的地理矩形坐标
+    // 查询指令：在这个矩形内，找出所有带有 addr:housenumber (门牌号) 和 addr:street (街道) 的真实房屋节点，一次提取 300 个
+    const bbox = "45.530,-122.665,45.555,-122.615";
+    const overpassQuery = `[out:json];node(${bbox})["addr:housenumber"]["addr:street"];out 300;`;
+    
+    // 使用官方与备用节点，防止单点故障
+    const endpoints = [
+        "https://overpass-api.de/api/interpreter",
+        "https://lz4.overpass-api.de/api/interpreter"
+    ];
+    const apiUrl = `${endpoints[Math.floor(Math.random() * endpoints.length)]}?data=${encodeURIComponent(overpassQuery)}`;
 
-  let lastError = null;
-
-  // 🔄 循环重试机制：最多尝试 5 次
-  // 如果某次关键词搜不到（比如搜 'Lake' 没结果），循环会自动继续下一次，直到搜到为止
-  // 这样避免了递归调用导致的“重试次数过多”报错
-  for (let attempt = 0; attempt < 5; attempt++) {
-    try {
-      // 随机选一个关键词
-      const keyword = searchTerms[Math.floor(Math.random() * searchTerms.length)];
-      
-      // 构造 OSM 搜索查询 (限制在 97212)
-      // limit=50 保证结果足够多，防止重复
-      const osmUrl = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(keyword + " in 97212, Portland, Oregon")}&format=json&addressdetails=1&limit=50`;
-
-      const response = await fetch(osmUrl, {
-        headers: {
-          "User-Agent": "RealAddressBot/5.0", // 必须带 UA
-          "Referer": "https://www.openstreetmap.org/"
-        }
-      });
-
-      if (!response.ok) {
-        lastError = `API Error ${response.status}`;
-        continue; // 网络错误，重试下一次
+    const response = await fetch(apiUrl, {
+      headers: {
+        // 生成随机 User-Agent 防止被识别为同一来源限制
+        "User-Agent": `TelegramAddressBot_CF_${Math.floor(Math.random()*100000)}`,
+        "Accept": "application/json"
       }
+    });
 
-      const data = await response.json();
-
-      // 严格清洗数据：必须包含【门牌号】、【路名】且邮编匹配
-      const validAddresses = data.filter(item => {
-          const addr = item.address;
-          return addr && 
-                 addr.house_number &&  
-                 addr.road &&          
-                 addr.postcode &&      
-                 addr.postcode.includes("97212");
-      });
-
-      // 如果当前关键词搜不到结果，continue 继续下一次循环
-      if (validAddresses.length === 0) {
-          continue;
-      }
-
-      // --- 成功获取！---
-      
-      // 随机抽取一个
-      const randomPlace = validAddresses[Math.floor(Math.random() * validAddresses.length)];
-      const addr = randomPlace.address;
-
-      // 格式化地址
-      const street = `${addr.house_number} ${addr.road}`;
-      const city = addr.city || addr.town || "Portland";
-      const state = "OR";
-      const zip = "97212";
-
-      const fullAddr = `${street}, ${city}, ${state} ${zip}`;
-
-      const result = {
-        address: street,
-        city: city,
-        state: state,
-        zip: zip,
-        fullAddress: fullAddr
-      };
-
-      if (!isJsonOnly && chatId) {
-        const msg = `🏠 <b>随机房源地址</b>\n\n📍 <code>${result.fullAddress}</code>`;
-        await sendMessage(chatId, msg);
-      }
-
-      return result; // 成功返回，结束函数
-
-    } catch (e) {
-      lastError = e.message;
-      // 捕获异常，继续下一次循环尝试
+    if (!response.ok) {
+        throw new Error(`API 拒绝响应: ${response.status}`);
     }
-  }
 
-  // --- 如果 5 次循环全部失败 ---
-  // 这里必须报错，因为你不允许生成假地址
-  if (chatId) {
-     await sendMessage(chatId, `❌ <b>获取失败:</b> 在线搜索无结果 (已重试5次)，请稍后再试。`);
+    const data = await response.json();
+    const houses = data.elements;
+
+    if (!houses || houses.length === 0) {
+        throw new Error("区域内未提取到有效建筑数据");
+    }
+
+    // --- 成功获取！---
+    // 从一次性拿到的 300 套真实房屋中，随机挑一套
+    const randomHouse = houses[Math.floor(Math.random() * houses.length)];
+    const tags = randomHouse.tags;
+
+    // 精准组装地址
+    const street = `${tags["addr:housenumber"]} ${tags["addr:street"]}`;
+    const city = tags["addr:city"] || CONFIG.CITY;
+    const state = "OR";
+    const zip = tags["addr:postcode"] || CONFIG.ZIP_CODE;
+
+    const fullAddr = `${street}, ${city}, ${state} ${zip}`;
+
+    const result = {
+      address: street,
+      city: city,
+      state: state,
+      zip: zip,
+      fullAddress: fullAddr
+    };
+
+    if (!isJsonOnly && chatId) {
+      const msg = `🏠 <b>随机房源地址</b>\n\n📍 <code>${result.fullAddress}</code>`;
+      await sendMessage(chatId, msg);
+    }
+
+    return result;
+
+  } catch (e) {
+    if (chatId) {
+       await sendMessage(chatId, `❌ <b>获取失败:</b> ${e.message} (请稍后再试)`);
+    }
+    return { error: e.message };
   }
-  return { error: "Failed to fetch online address after 5 attempts" };
 }
 
-// 2. 处理取号 (已修复“组合”丢失的问题)
+// 2. 处理取号
 async function handleGetAccount(chatId) {
   const [page, stockCount] = await Promise.all([
     queryNotionUnused(), 
